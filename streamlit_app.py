@@ -1,25 +1,34 @@
 import streamlit as st
-import requests
 import os
 import json
+import uuid
+import shutil
+from transcription import transcription_service
+from analysis import MedicalAnalysisService
+import storage_utils
 
-# Backend URL (Assumes FastAPI is running on port 8000)
-BACKEND_URL = "http://localhost:8000"
+# Initialize services
+analysis_service = MedicalAnalysisService()
+
+# Directory for temporary file storage
+TEMP_DIR = "temp_uploads"
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 st.set_page_config(page_title="AI Medical Scribe Tester", layout="wide")
 
-st.title("🩺 AI Medical Scribe - Backend Tester")
+st.title("🩺 AI Medical Scribe - Dedicated Tester")
 st.markdown("""
-This app allows you to test the AI Medical Scribe backend. 
-1. Upload an audio recording.
-2. Get the transcript.
-3. Automatically extract medical entities and generate a patient-friendly summary.
+This app processes medical consultations using the Groq API.
+1. **Transcribe**: Converts audio to text using Whisper.
+2. **Analyze**: Extracts clinical details and generates a patient summary using Llama 3.3.
 """)
 
 # Sidebar for API Key
 with st.sidebar:
     st.header("Settings")
-    api_key = st.text_input("Groq API Key (Optional)", type="password", help="If not provided, the backend's environment variables will be used.")
+    api_key = st.text_input("Groq API Key (Optional)", type="password", 
+                           help="If provided, this will override the system defaults.")
+    st.info("Direct Integration Mode: No separate backend required.")
 
 # Tabs for different stages
 tab1, tab2 = st.tabs(["Transcription", "Medical Analysis"])
@@ -29,24 +38,34 @@ with tab1:
     audio_file = st.file_uploader("Upload Audio File", type=["mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm", "ogg", "flac"])
     
     if st.button("Start Transcription") and audio_file:
-        with st.spinner("Transcribing..."):
-            files = {"file": (audio_file.name, audio_file.getvalue(), audio_file.type)}
-            params = {"api_key": api_key} if api_key else {}
+        with st.spinner("Processing Audio..."):
+            # Generate unique ID and save file temporarily
+            file_id = str(uuid.uuid4())
+            file_ext = audio_file.name.split(".")[-1]
+            temp_path = os.path.join(TEMP_DIR, f"{file_id}.{file_ext}")
+            
+            with open(temp_path, "wb") as f:
+                f.write(audio_file.getvalue())
             
             try:
-                response = requests.post(f"{BACKEND_URL}/transcribe", files=files, params=params)
-                response.raise_for_status()
-                data = response.json()
+                # Direct call to transcription service
+                transcript = transcription_service.transcribe(temp_path, api_key=api_key)
                 
-                st.session_state['transcript'] = data.get("transcript")
-                st.session_state['file_id'] = data.get("file_id")
+                # Save to local storage
+                storage_utils.save_transcript(file_id, transcript)
+                
+                st.session_state['transcript'] = transcript
+                st.session_state['file_id'] = file_id
                 
                 st.success("Transcription Complete!")
-                st.text_area("Transcript", value=st.session_state['transcript'], height=300)
-                st.info(f"Session ID: {st.session_state['file_id']}")
+                st.text_area("Transcript", value=transcript, height=300)
+                st.info(f"Session ID (Saved locally): {file_id}")
                 
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"Transcription Error: {str(e)}")
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
 
 with tab2:
     st.header("2. AI Medical Analysis")
@@ -57,39 +76,44 @@ with tab2:
                                height=300, 
                                help="You can edit the transcript before analysis.")
     
-    file_id = st.text_input("Session ID (Optional)", value=st.session_state.get('file_id', ""), help="Used to group results in local storage.")
+    curr_file_id = st.text_input("Session ID (Optional)", 
+                                value=st.session_state.get('file_id', ""), 
+                                help="Used to save results in local storage.")
 
     if st.button("Run Analysis") and input_text:
-        with st.spinner("Analyzing text..."):
-            payload = {
-                "text": input_text,
-                "api_key": api_key if api_key else None,
-                "file_id": file_id if file_id else None
-            }
-            
+        with st.spinner("Extracting Clinical Data & Generating Summary..."):
             try:
-                response = requests.post(f"{BACKEND_URL}/analyze", json=payload)
-                response.raise_for_status()
-                analysis_data = response.json()
+                # Direct calls to analysis service
+                entities = analysis_service.extract_entities(input_text, api_key=api_key)
+                summary = analysis_service.generate_patient_summary(input_text, entities, api_key=api_key)
+                
+                # Save results if file_id is available
+                if curr_file_id:
+                    storage_utils.save_entities(curr_file_id, entities)
+                    storage_utils.save_summary(curr_file_id, summary)
                 
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    st.subheader("Medical Entities")
-                    if analysis_data.get("entities"):
-                        st.json(analysis_data["entities"])
+                    st.subheader("Structured Clinical Entities")
+                    if entities:
+                        for ent in entities:
+                            st.markdown(f"**{ent['label']}**: {ent['text']}")
                     else:
-                        st.write("No entities found.")
+                        st.write("No specific medical entities extracted.")
                 
                 with col2:
-                    st.subheader("Patient Summary")
-                    st.markdown(analysis_data.get("summary", "No summary generated."))
+                    st.subheader("Final Patient Summary")
+                    st.markdown(summary)
                 
-                st.success(f"Analysis complete! Results saved in `storage/{file_id}/`")
-                
+                if curr_file_id:
+                    st.success(f"Analysis complete! Data indexed under: `{curr_file_id}`")
+                else:
+                    st.success("Analysis complete!")
+                    
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"Analysis Error: {str(e)}")
 
 # Footer
 st.markdown("---")
-st.caption("AI Medical Scribe Backend - Local Storage Enabled")
+st.caption("AI Medical Scribe - Self-Contained Deployment")
