@@ -26,7 +26,7 @@ tab1, tab2 = st.tabs(["Transcription", "Medical Analysis"])
 
 with tab1:
     st.header("1. Transcribe Consultation")
-    audio_file = st.file_uploader("Upload Audio File", type=["mp3", "wav", "m4a"])
+    audio_file = st.file_uploader("Upload Audio File", type=["mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm", "ogg", "flac"])
     
     if st.button("Start Transcription") and audio_file:
         with st.spinner("Transcribing..."):

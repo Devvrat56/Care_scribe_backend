@@ -68,7 +68,7 @@ async def analyze_text(request: AnalysisRequest):
     if not analysis_service:
         raise HTTPException(status_code=503, detail="Analysis service not initialized")
     
-    entities = analysis_service.extract_entities(request.text)
+    entities = analysis_service.extract_entities(request.text, api_key=request.api_key)
     summary = analysis_service.generate_patient_summary(request.text, entities, api_key=request.api_key)
     
     # Save entities and summary to local storage if file_id is provided
@@ -81,8 +81,8 @@ async def analyze_text(request: AnalysisRequest):
         "summary": summary
     }
 
-# Serve frontend
-app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
+# Serve frontend (Commented out as Streamlit is used instead)
+# app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 
 if __name__ == "__main__":
     import uvicorn

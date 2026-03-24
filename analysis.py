@@ -2,11 +2,12 @@ import spacy
 import scispacy
 from groq import Groq
 import os
-from typing import List, Dict
+import json
+from typing import List, Dict, Optional
 from rapidfuzz import process, fuzz
 
 class MedicalAnalysisService:
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: Optional[str] = None):
         # Load scispaCy models
         try:
             self.nlp_bc5cdr = spacy.load("en_ner_bc5cdr_md")
@@ -43,31 +44,77 @@ class MedicalAnalysisService:
             corrected_words.append(word)
         return " ".join(corrected_words)
 
-    def extract_entities(self, text: str) -> List[Dict]:
-        if not self.nlp_bc5cdr:
-            return []
-        
-        # Apply fuzzy correction
-        corrected_text = self.fuzzy_correct(text)
-        
-        doc_bc5cdr = self.nlp_bc5cdr(corrected_text)
-        doc_bionlp = self.nlp_bionlp(corrected_text)
-        
+    def extract_entities(self, text: str, api_key: Optional[str] = None) -> List[Dict]:
         entities = []
         seen = set()
+
+        # 1. ScispaCy NER (existing)
+        if self.nlp_bc5cdr:
+            # Apply fuzzy correction
+            corrected_text = self.fuzzy_correct(text)
+            doc_bc5cdr = self.nlp_bc5cdr(corrected_text)
+            doc_bionlp = self.nlp_bionlp(corrected_text)
+            
+            for doc in [doc_bc5cdr, doc_bionlp]:
+                for ent in doc.ents:
+                    key = (ent.text.lower(), ent.label_)
+                    if key not in seen:
+                        entities.append({"text": ent.text, "label": ent.label_})
+                        seen.add(key)
         
-        for doc in [doc_bc5cdr, doc_bionlp]:
-            for ent in doc.ents:
-                key = (ent.text.lower(), ent.label_)
-                if key not in seen:
-                    entities.append({
-                        "text": ent.text,
-                        "label": ent.label_,
-                    })
-                    seen.add(key)
+        # 2. LLM-based Detailed Extraction (New)
+        detailed_entities = self.extract_detailed_entities(text, api_key)
+        for ent in detailed_entities:
+            key = (ent['text'].lower(), ent['label'])
+            if key not in seen:
+                entities.append(ent)
+                seen.add(key)
+                
         return entities
 
-    def generate_patient_summary(self, transcript: str, entities: List[Dict], api_key: str = None) -> str:
+    def extract_detailed_entities(self, text: str, api_key: Optional[str] = None) -> List[Dict]:
+        client = self.groq_client
+        if api_key:
+            client = Groq(api_key=api_key)
+        
+        if not client:
+            return []
+
+        prompt = f"""
+        Extract detailed medical information from the following consultation transcript.
+        Focus on:
+        - Patient Details (Age, Gender, ID)
+        - Patient Surgery (Existing, upcoming, pre-op, post-op)
+        - Medications (Name, Dosage, Frequency, Time Slot)
+        - Injuries (Details, location, pre/post-surgery state)
+        - Pain levels and locations
+        
+        TRANSCRIPT: {text}
+        
+        RETURN ONLY A JSON ARRAY of objects: [{{"text": "ENTITY", "label": "LABEL"}}]
+        Valid Labels: PATIENT_DETAIL, SURGERY, MEDICATION, DOSAGE, TIME_SLOT, INJURY, PAIN.
+        """
+        
+        try:
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                response_format={"type": "json_object"}
+            )
+            content = completion.choices[0].message.content
+            # Handle potential JSON wrapping if not using response_format correctly
+            data = json.loads(content)
+            if isinstance(data, dict) and "entities" in data:
+                 return data["entities"]
+            if isinstance(data, list):
+                return data
+            return []
+        except Exception as e:
+            print(f"Detailed extraction failed: {e}")
+            return []
+
+    def generate_patient_summary(self, transcript: str, entities: List[Dict], api_key: Optional[str] = None) -> str:
         client = self.groq_client
         if api_key:
             client = Groq(api_key=api_key)
@@ -78,35 +125,29 @@ class MedicalAnalysisService:
         entity_str = ", ".join([f"{e['text']} ({e['label']})" for e in entities])
         
         prompt = f"""
-        You are a highly skilled and compassionate medical assistant. Your goal is to help a patient understand their consultation.
+        You are a highly skilled medical scribe. Create a patient-friendly summary from this consultation.
         
-        TASK:
-        Based on the transcript and identified medical entities, create a structured patient-friendly summary.
-        
-        PRIORITIZE:
-        1. **Medication Instructions**: Clearly list any new or existing medications, including dosages, frequencies, and specific instructions (e.g., 'Take with food').
-        2. **Doctor's Advice**: Summarize the key medical advice and explanations given by the doctor.
-        3. **Next Steps**: Explicitly list what the patient needs to do next (appointments, labs, monitoring).
-        
-        STYLE:
-        - Use simple, everyday language. Avoid complex jargon unless explaining it simply.
-        - Be empathetic and clear.
-        - Use bullet points for readability.
-        
-        CONSULTATION CONTEXT:
+        CONSULTATION DATA:
         Transcript: {transcript}
-        Medical Entities: {entity_str}
+        Key Medical Details (extracted): {entity_str}
         
-        PATIENT SUMMARY & MEDICATION GUIDE:
+        REQUIREMENTS:
+        1. **Patient Context**: Briefly mention relevant details like current state or reason for visit.
+        2. **Surgery Info**: Detail any surgery mentioned (pre-op instructions or post-op care/injuries).
+        3. **Medication Schedule**: List medications with exact dosages and *specific time slots* (e.g., Morning/Night).
+        4. **Pain/Symptom Management**: Address any pain or injuries discussed.
+        5. **Empathetic Tone**: Use clear, reassuring, and simple language.
+        
+        PATIENT SUMMARY:
         """
         
         completion = client.chat.completions.create(
-            model="llama-3.1-70b-versatile",
+            model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": "You are a professional medical scribe dedicated to patient clarity and medication adherence."},
+                {"role": "system", "content": "You provide clear, accurate, and empathetic medical summaries for patients."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.3, # Lower temperature for medical accuracy
+            temperature=0.3,
             max_tokens=2048,
         )
         
