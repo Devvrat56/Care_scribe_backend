@@ -1,5 +1,3 @@
-import spacy
-import scispacy
 from groq import Groq
 import os
 import json
@@ -8,22 +6,13 @@ from rapidfuzz import process, fuzz
 
 class MedicalAnalysisService:
     def __init__(self, api_key: Optional[str] = None):
-        # Load scispaCy models
-        try:
-            self.nlp_bc5cdr = spacy.load("en_ner_bc5cdr_md")
-            self.nlp_bionlp = spacy.load("en_ner_bionlp13cg_md")
-        except Exception as e:
-            print(f"Models loading failed: {e}. Ensure they are installed.")
-            self.nlp_bc5cdr = None
-            self.nlp_bionlp = None
-        
         self.api_key = api_key or os.getenv("GROQ_API_KEY")
         if self.api_key:
             self.groq_client = Groq(api_key=self.api_key)
         else:
             self.groq_client = None
             
-        # Common medical terms for fuzzy matching (medication emphasis)
+        # Common medical terms for fuzzy matching
         self.medical_dictionary = [
             "Metformin", "Lisinopril", "Diabetes", "Hypertension", "Glucose", 
             "Cholesterol", "Amoxicillin", "Ibuprofen", "Acetaminophen", "Asthma",
@@ -45,31 +34,12 @@ class MedicalAnalysisService:
         return " ".join(corrected_words)
 
     def extract_entities(self, text: str, api_key: Optional[str] = None) -> List[Dict]:
-        entities = []
-        seen = set()
-
-        # 1. ScispaCy NER (existing)
-        if self.nlp_bc5cdr:
-            # Apply fuzzy correction
-            corrected_text = self.fuzzy_correct(text)
-            doc_bc5cdr = self.nlp_bc5cdr(corrected_text)
-            doc_bionlp = self.nlp_bionlp(corrected_text)
-            
-            for doc in [doc_bc5cdr, doc_bionlp]:
-                for ent in doc.ents:
-                    key = (ent.text.lower(), ent.label_)
-                    if key not in seen:
-                        entities.append({"text": ent.text, "label": ent.label_})
-                        seen.add(key)
+        """Extracts medical entities using LLM-based detailed extraction."""
+        # Clean and correct text
+        corrected_text = self.fuzzy_correct(text)
         
-        # 2. LLM-based Detailed Extraction (New)
-        detailed_entities = self.extract_detailed_entities(text, api_key)
-        for ent in detailed_entities:
-            key = (ent['text'].lower(), ent['label'])
-            if key not in seen:
-                entities.append(ent)
-                seen.add(key)
-                
+        # LLM-based Detailed Extraction
+        entities = self.extract_detailed_entities(corrected_text, api_key)
         return entities
 
     def extract_detailed_entities(self, text: str, api_key: Optional[str] = None) -> List[Dict]:
